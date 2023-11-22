@@ -1,0 +1,193 @@
+// CreatedBy     : Harish Raj
+// CreatedTime   : 15 Feb 2023
+// ModifiedBy    : Harish Raj
+// ModifiedTime  : 15 Feb 2023
+// Description   : This file contains all the instruction for jenkins pipeline
+
+
+// Pipeline configurations
+def ENV_NAME = 'Dev'
+def CONFIG_REPO_NAME = "BAAS-APP-STORE-CONFIG"
+def CONFIG_REPO_BRANCH = "develop"
+def CONFIG_REPO_FOLDER = "BAAS-APP-STORE-GATEWAY"
+def CONFIG_REPO_URL = "https://harishraj:lucd2yqw4dkmnvg25c34pk74fno5mf4poptxtq2e4cyjxgp3a3na@dev.azure.com/goveindia/Baas-360/_git/BAAS-APP-STORE-CONFIG"
+def DOCKER_REGISTRY = "10.104.4.52:3001"
+def DOCKER_USERNAME = "admin"
+def DOCKER_PASSWORD = "HaRbOr50012"
+def PROJECT_NAME = "dev"
+def HARBOR_URL = "http://techops.alitasys.com:3001/api/v2.0"
+def HARBOR_PROJECT = "dev"
+def HARBOR_REPOSITORY = "baasappstoregateway-image"
+def tagName = "latest"
+
+pipeline {
+    agent { label "Dev" }
+     environment {
+        // Disable SSL certificate validation
+        JAVA_OPTS = '-Dcom.sun.net.ssl.checkRevocation=false -Djavax.net.ssl.trustStore=/media/jenkins.jks -Djavax.net.ssl.trustStorePassword=Gove@1432'
+    }
+    stages {
+               stage('CLONE CONFIG REPOSITORY') {
+            steps {
+                script{
+                    catchError {
+                        sh "git clone --recurse-submodules ${CONFIG_REPO_URL} -b ${CONFIG_REPO_BRANCH}"
+                    }
+                }
+            }
+        }
+        stage('SETTING UP ALL THE CONFIGURATIONS') {
+            steps {
+                script {
+                        def sourcePath = sh(script: 'pwd', returnStdout: true).trim()
+                        def targetPath = sh(script: 'pwd', returnStdout: true).trim()
+                        sh "rm -rf ${sourcePath}/package-lock.json"
+                        sh "cp -r ${sourcePath}/${CONFIG_REPO_NAME}/${CONFIG_REPO_FOLDER}/package.json ${targetPath}"
+                        sh "cp -r ${sourcePath}/${CONFIG_REPO_NAME}/${CONFIG_REPO_FOLDER}/Dockerfile ${targetPath}"
+                        sh "cp -r ${sourcePath}/${CONFIG_REPO_NAME}/${CONFIG_REPO_FOLDER}/gateway.config.yml ${targetPath}/src/config"
+                        sh "cp -r ${sourcePath}/${CONFIG_REPO_NAME}/${CONFIG_REPO_FOLDER}/post.deployment.email.sh ${targetPath}"
+                        sh "cp -r ${sourcePath}/${CONFIG_REPO_NAME}/${CONFIG_REPO_FOLDER}/pre.deployment.email.sh ${targetPath}"
+                        sh "cp -r ${sourcePath}/${CONFIG_REPO_NAME}/${CONFIG_REPO_FOLDER}/test.report.email.sh ${targetPath}"
+                        sh "rm -rf ${sourcePath}/${CONFIG_REPO_NAME}"
+                }
+            }
+        }
+        stage('PRE-DEPLOYMENT EMAIL') {
+            steps {
+                    script {
+                        sh 'chmod +x pre.deployment.email.sh'
+                        sh './pre.deployment.email.sh'
+                    }
+                }
+            }
+        stage('STOPPING THE CURRENTLY RUNNING CONTAINER') {
+            steps {
+                script{
+                    catchError {
+                        sh 'echo Unit-Drum-Sweep9 | sudo -S docker stop baasappstoregateway-container'
+                    }
+                }
+            }
+        }
+        stage('DELETING THE STOPPED CONTAINER') {
+            steps{
+                script{
+                    catchError {
+                        sh 'echo Unit-Drum-Sweep9 | sudo -S docker rm baasappstoregateway-container'
+                    }
+                }
+            }
+        }
+        stage('DELETING THE IMAGE OF THE CONTAINER') {
+            steps{
+                script{
+                    catchError {
+                        sh 'echo Unit-Drum-Sweep9 | sudo -S docker rmi 10.104.4.52:3001/dev/baasappstoregateway-image:latest'
+                    }
+                }
+            }
+        }
+        stage('Docker Login') {
+            steps {
+                script {
+                    sh "echo Unit-Drum-Sweep9 | sudo -S docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD} ${DOCKER_REGISTRY}"
+                }
+            }
+        }
+        stage('Build and Push Image') {
+            steps {
+                script {
+                    def buildNumber = currentBuild.number
+                    def IMAGE_NAME = "${PROJECT_NAME}/baasappstoregateway-image"
+
+                    sh "echo Unit-Drum-Sweep9 | sudo -S docker build -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:${buildNumber} ."
+                    sh "echo Unit-Drum-Sweep9 | sudo -S docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:${buildNumber}"
+                    sh "echo Unit-Drum-Sweep9 | sudo -S docker rmi ${DOCKER_REGISTRY}/${IMAGE_NAME}:${buildNumber}"
+                }
+            }
+        }
+        stage('Delete Harbor Artifact') {
+            steps {
+                script {
+                    def IMAGE_NAME = "${PROJECT_NAME}/baasappstoregateway-image"
+                    def buildNumber = currentBuild.number
+
+                    // Construct the Harbor artifact URL for the previous image tag
+                    def harborArtifactUrl = "${HARBOR_URL}/projects/${HARBOR_PROJECT}/repositories/${HARBOR_REPOSITORY}/artifacts/latest"
+                    echo "Deleting artifact from Harbor URL: ${harborArtifactUrl}"
+
+                    catchError {
+                        try {
+                            def deleteRequest = httpRequest(
+                                url: harborArtifactUrl,
+                                httpMode: 'DELETE',
+                                authentication: 'myHarborCredentials'
+                            )
+
+                            if (deleteRequest.status == 200) {
+                                echo "Artifact for tag deleted successfully from Harbor."
+                            } else {
+                                echo "Failed to delete artifact for tag from Harbor. Status code: ${deleteRequest.status}"
+                            }
+                        } catch (Exception e) {
+                            echo "Error: ${e.message}"
+                            currentBuild.result = 'FAILURE'
+                        }
+                    }
+                }
+            }
+        }
+        stage('Create Tag') {
+            steps {
+                script {
+                    def apiUrl = "${HARBOR_URL}/projects/${HARBOR_PROJECT}/repositories/${HARBOR_REPOSITORY}/artifacts/${currentBuild.number}/tags"
+                    echo "Creating tag at URL: ${apiUrl}"
+
+                    def createTagRequest = httpRequest(
+                        url: apiUrl,
+                        httpMode: 'POST',
+                        contentType: 'APPLICATION_JSON',
+                        requestBody: "{\"name\":\"${tagName}\"}",
+                        authentication: 'myHarborCredentials'
+                    )
+
+                    if (createTagRequest.status == 201) {
+                        echo "Tag '${tagName}' created successfully."
+                    } else {
+                        error "Failed to create tag. Status code: ${createTagRequest.status}"
+                    }
+                }
+            }
+        }
+		stage('pull Image') {
+            steps {
+                script {
+                    sh "echo Unit-Drum-Sweep9 | sudo -S docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD} ${DOCKER_REGISTRY}"
+                    sh "echo Unit-Drum-Sweep9 | sudo -S docker pull 10.104.4.52:3001/dev/baasappstoregateway-image:latest"
+                }
+            }
+        }
+	    stage('RUNNING A NEW CONATINER FROM NEW IMAGE') {
+            steps{
+                script{
+                    catchError{
+                        sh 'echo Unit-Drum-Sweep9 | sudo -S docker run --memory-reservation=120m -m 240m -d -p 4001:4001 --net nginx-proxy-manager_dev-network --name baasappstoregateway-container 10.104.4.52:3001/dev/baasappstoregateway-image:latest'
+                    }
+                }
+            }
+        }
+        stage('POST-DEPLOYMENT EMAIL') {
+            steps{
+                script{
+                   sh 'chmod +x post.deployment.email.sh'
+                     sh './post.deployment.email.sh'
+                }
+            }
+        }
+        stage('CLEAN-WORKSPACE') {
+            steps {
+                cleanWs()
+            }
+        }
+    }
+}
